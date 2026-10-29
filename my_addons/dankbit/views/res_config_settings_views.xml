@@ -1,0 +1,62 @@
+<odoo>
+
+    <record id="res_config_settings_view_form_inherit_dankbit" model="ir.ui.view">
+        <field name="name">res.config.settings.inherit.dankbit</field>
+        <field name="model">res.config.settings</field>
+        <field name="inherit_id" ref="base.res_config_settings_view_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//form" position="inside">
+                 <app data-string="Dankbit" string="Dankbit" name="dankbit_settings">
+                    <block title="General Settings" id="dankbit_graph_settings" groups="base.group_no_one">
+                        <setting>
+                            <field name="refresh_interval" placeholder="Refresh Interval"/>
+                        </setting>
+                        <setting>
+                            <field name="deribit_timeout" placeholder="Deribit API timeout (s)"/>
+                        </setting>
+                        <setting>
+                            <field name="deribit_cache_ttl" placeholder="Deribit cache TTL (s)"/>
+                        </setting>
+                    </block>
+
+                    <block title="BTC Settings" id="dankbit_graph_settings" groups="base.group_no_one">
+                        <setting>
+                            <field name="from_price" placeholder="From Price"/>
+                        </setting>
+                        <setting>
+                            <field name="to_price" placeholder="To Price"/>
+                        </setting>
+                        <setting>
+                            <field name="steps" placeholder="Steps"/>
+                        </setting>
+                    </block>
+
+                    <block title="TradingView Chart Settings" id="dankbit_tv_chart_settings" groups="base.group_no_one">
+                        <setting>
+                            <field name="ll_other_lines_min_gamma" placeholder="500"/>
+                        </setting>
+                    </block>
+
+                    <block title="Dankbit AI" id="dankbit_chat_settings" groups="base.group_no_one">
+                        <setting>
+                            <field name="chat_model" placeholder="qwen3:14b"/>
+                        </setting>
+                    </block>
+
+                    <block title="ETH Settings" id="dankbit_eth_graph_settings" groups="base.group_no_one">
+                        <setting>
+                            <field name="eth_from_price" placeholder="ETH From Price"/>
+                        </setting>
+                        <setting>
+                            <field name="eth_to_price" placeholder="ETH To Price"/>
+                        </setting>
+                        <setting>
+                            <field name="eth_steps" placeholder="ETH Steps"/>
+                        </setting>
+                    </block>
+                 </app>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

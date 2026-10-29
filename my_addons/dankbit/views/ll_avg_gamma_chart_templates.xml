@@ -1,0 +1,1318 @@
+<odoo>
+	<!-- Standalone, minimal TradingView page for /ll/<asset> — its own file,
+	     structurally a stripped-down /4l/<asset>
+	     (four_leg_gamma_chart_templates.xml). Same Coinbase-spot candle
+	     source (dankbit.trade.get_candles_coinbase(), /api/klines-coinbase/
+	     <asset> proxy), same "Timeframe" dropdown (1h/4h/1d, 1h default).
+	     "Window" is a free-form number + Hours/Days unit picker
+	     (3 days default) — no "All" option, unlike /4l/<asset>. Same
+	     Theme/Window Line/Ruler/Settings/Refresh
+	     controls, same single vertical Window reference line + label.
+
+	     Differences from /4l:
+	     - NO "Expiry" dropdown. Every active expiry is always considered.
+	     - NO "Gamma Legs"/"AVG"/"N+1 AVG" checkboxes.
+	     - Instead of 4 per-leg gamma lines (BCG/BPG/SCG/SPG) for one chosen
+	       expiry, it draws ONE horizontal line PER active expiry, at that
+	       expiry's own dominant leg's price (the present leg — one with at
+	       least one trade — whose |gamma value| is largest). Sourced from
+	       /api/ll-gamma/<asset> (ll_avg_gamma_json — one dominant-leg
+	       reading per expiry, response sorted by |dominant gamma value|
+	       desc), recomputed live on every poll (dankbit.refresh_interval).
+	       No model/table behind this page. This used to instead draw at
+	       most 2 lines, each the present-leg AVERAGE of BCG/BPG/SCG/SPG for
+	       the top-2 |AVG gamma value| expiries — changed per product
+	       decision to show every expiry's own single strongest leg rather
+	       than a 2-expiry blended summary. Each line is styled by its
+	       expiry's distance in 4 groups (default <= 1 / 7 / 30 days /
+	       beyond: strong violet solid thick, violet solid, indigo dashed,
+	       grey dotted — colors and day limits editable in the "Chart
+	       Appearance" modal). Each line's label ends with
+	       "| <instrument> | <time left>" (e.g. "LC | 96M | BTC-2OCT26 | 3d"). The strongest expiry's own
+	       line (rank 0) is gated behind its own "Strongest" checkbox
+	       (right after "Window Line", CHECKED by default); every other
+	       expiry's line is gated behind the "Other Expiries" checkbox
+	       (right after "Strongest", CHECKED by default; only
+	       expiries with |dominant gamma value| above the
+	       dankbit.ll_other_lines_min_gamma setting for BTC (default
+	       500M), 100M for ETH) —
+	       unchecking/checking either redraws instantly from the
+	       last-fetched lastExpiries array via renderLlLines(), no
+	       re-fetch.
+	     - A separate "1D/2D/3D" checkbox (right after "Other Expiries",
+	       UNCHECKED by default) draws 3 more horizontal lines — the
+	       single strongest (rank 0) dominant-leg reading over a fixed
+	       trailing 24h/48h/72h window each, independent of the page's
+	       own free-form "Window" control. All 3 share one color
+	       (`chartColors.window123`, user-recolorable via "Chart
+	       Appearance"), and each line's label carries its own window
+	       as a trailing "| 1D"/"| 2D"/"| 3D" segment. Fetched via 3
+	       parallel calls to /api/ll-gamma/<asset>?hours=24/48/72,
+	       fired fire-and-forget from inside refreshLlGamma() (same
+	       pattern /4l/<asset>'s own N+1 AVG line uses) so it rides the
+	       same polling/manual-refresh cadence with no extra call sites
+	       needed. -->
+
+	<template id="dankbit_ll_avg_gamma_chart" name="Dankbit LL Chart">
+		<html>
+			<head>
+				<meta charset="utf-8"/>
+				<meta name="viewport" content="width=device-width, initial-scale=1"/>
+				<title><t t-esc="asset"/> — LL</title>
+				<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js" type="text/javascript"> </script>
+				<style>
+					* { margin: 0; padding: 0; box-sizing: border-box; }
+					html, body { width: 100vw; height: 100vh; overflow: hidden; background: #ffffff; }
+					#chart-container { width: 100%; height: 100%; }
+					#status {
+						position: fixed; bottom: 32px; left: 12px;
+						font-family: monospace; font-size: 11pt;
+						color: #555; background: rgba(255,255,255,0.88);
+						padding: 2px 10px; border-radius: 4px;
+						z-index: 10; pointer-events: none;
+					}
+					#tf-bar {
+						position: fixed; top: 8px; left: 12px;
+						display: flex; gap: 4px; align-items: center; z-index: 10;
+						flex-wrap: wrap; max-width: calc(100vw - 12px - 80px);
+					}
+					#exchange-label {
+						position: fixed; top: var(--tf-bar-bottom, 36px); left: 12px;
+						font-family: monospace; font-size: 11pt;
+						color: #555; background: rgba(255,255,255,0.88);
+						padding: 2px 10px; border-radius: 4px; border: 1px solid #ccc;
+						z-index: 10; pointer-events: none;
+					}
+					.tf-label {
+						font-family: monospace; font-size: 11pt;
+						color: #555; padding: 0 2px;
+					}
+					#ruler-info {
+						position: fixed; top: calc(var(--tf-bar-bottom, 36px) + 4px); left: 12px;
+						font-family: monospace; font-size: 12pt; font-weight: bold;
+						color: #222; background: rgba(255,255,255,0.92);
+						padding: 3px 12px; border-radius: 4px; border: 1px solid #ccc;
+						z-index: 10; display: none;
+					}
+					.tf-btn {
+						font-family: monospace; font-size: 11pt;
+						color: #555; background: rgba(255,255,255,0.88);
+						padding: 2px 10px; border-radius: 4px;
+						cursor: pointer; border: 1px solid #ccc;
+					}
+					.tf-btn:hover { background: #f0f0f0; }
+					.tf-btn.active { background: #333; color: #fff; border-color: #333; }
+
+					#context-menu {
+						position: fixed;
+						font-family: monospace; font-size: 11pt;
+						background: #fff; border: 1px solid #ccc; border-radius: 4px;
+						box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+						padding: 4px 0; z-index: 20; display: none;
+						min-width: 160px;
+					}
+					#context-menu .context-menu-item {
+						padding: 6px 14px; color: #333; cursor: pointer; white-space: nowrap;
+					}
+					#context-menu .context-menu-item:hover { background: #f0f0f0; }
+
+					/* "Settings" button/dialog — color pickers for this page's
+					   dominant-leg lines (strongest expiry vs. the rest).
+					   Plain centered overlay + box, no library — same
+					   hand-rolled shape as the 4L chart's own modal, copied
+					   rather than shared so the two pages' color settings
+					   stay independent (own COLOR_STORAGE_KEY below). */
+					.modal-overlay {
+						position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+						background: rgba(0,0,0,0.4);
+						z-index: 30;
+						display: flex; align-items: center; justify-content: center;
+					}
+					.modal-box {
+						background: #fff; border-radius: 6px; padding: 16px 20px;
+						font-family: monospace; font-size: 11pt; color: #333;
+						min-width: 280px; box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+					}
+					.modal-header {
+						display: flex; justify-content: space-between; align-items: center;
+						font-weight: bold; margin-bottom: 12px; font-size: 12pt;
+					}
+					.modal-close { cursor: pointer; padding: 0 4px; }
+					.modal-close:hover { color: #c00; }
+					.modal-section { margin-bottom: 12px; }
+					.modal-section-title { font-weight: bold; margin-bottom: 6px; color: #555; }
+					.color-row {
+						display: flex; align-items: center; justify-content: space-between;
+						gap: 8px; padding: 3px 0;
+					}
+					.color-row input[type="color"] { width: 40px; height: 24px; border: none; padding: 0; cursor: pointer; }
+					.color-row input[type="number"] { width: 52px; }
+					.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+					body.dark, body.dark html { background: #000000; }
+					body.dark #status { color: #ccc; background: rgba(0,0,0,0.75); }
+					body.dark .tf-label { color: #ccc; }
+					body.dark #ruler-info { color: #eee; background: rgba(0,0,0,0.85); border-color: #555; }
+					body.dark #exchange-label { color: #ccc; background: rgba(0,0,0,0.75); border-color: #555; }
+					body.dark .tf-btn { color: #ccc; background: rgba(0,0,0,0.75); border-color: #555; }
+					body.dark .tf-btn:hover { background: #262626; }
+					body.dark .tf-btn.active { background: #e0e0e0; color: #000; border-color: #e0e0e0; }
+					body.dark #context-menu { background: #1a1a1a; border-color: #555; box-shadow: 0 2px 8px rgba(0,0,0,0.6); }
+					body.dark #context-menu .context-menu-item { color: #ddd; }
+					body.dark #context-menu .context-menu-item:hover { background: #333; }
+					body.dark .modal-box { background: #1a1a1a; color: #ddd; box-shadow: 0 4px 20px rgba(0,0,0,0.7); }
+					body.dark .modal-section-title { color: #aaa; }
+					body.dark .modal-close:hover { color: #f66; }
+
+					/* Shown while refreshLlGamma() is fetching/computing the
+					   dominant-leg lines (a fresh options.per_leg_gamma() call
+					   per active expiry server-side each time — no persisted
+					   history behind this page). Hidden as soon as that fetch
+					   resolves. */
+					#spinner {
+						position: fixed; top: 50%; left: 50%;
+						width: 32px; height: 32px; margin: -16px 0 0 -16px;
+						border: 3px solid rgba(0,0,0,0.15); border-top-color: #555;
+						border-radius: 50%;
+						animation: dankbit-spin 0.8s linear infinite;
+						z-index: 20; display: none; pointer-events: none;
+					}
+					body.dark #spinner { border-color: rgba(255,255,255,0.15); border-top-color: #ccc; }
+					@keyframes dankbit-spin { to { transform: rotate(360deg); } }
+
+					#window-vline {
+						position: fixed; top: 0; height: 100vh; width: 1px;
+						background: rgba(100,100,100,0.55);
+						z-index: 5; pointer-events: none; display: none;
+					}
+					body.dark #window-vline { background: rgba(210,210,210,0.45); }
+					#window-vline-label { color: #646464; }
+					body.dark #window-vline-label { color: #d2d2d2; }
+
+					.vline-label {
+						position: fixed; top: calc(var(--tf-bar-bottom, 36px) + 34px);
+						transform: translateX(-50%);
+						font-family: monospace; font-size: 10pt; font-weight: bold;
+						padding: 1px 5px; border-radius: 3px;
+						background: rgba(255,255,255,0.88); border: 1px solid rgba(0,0,0,0.15);
+						z-index: 6; pointer-events: none; white-space: nowrap; display: none;
+					}
+					body.dark .vline-label { background: rgba(0,0,0,0.75); border-color: rgba(255,255,255,0.2); }
+					/* Chat panel — asks the local Ollama model about trades
+					   via POST /api/chat/ASSET (controllers/chat.py). */
+					#chat-panel {
+						position: fixed; right: 12px; bottom: 40px; z-index: 30;
+						width: 400px; max-width: calc(100vw - 24px); height: 60vh;
+						display: none; flex-direction: column;
+						font-family: monospace; font-size: 10.5pt; color: #333;
+						background: rgba(255,255,255,0.97); border: 1px solid #ccc;
+						border-radius: 6px; box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+					}
+					#chat-panel.open { display: flex; }
+					#chat-header {
+						display: flex; justify-content: space-between; align-items: center;
+						padding: 6px 10px; border-bottom: 1px solid #ddd; font-weight: bold;
+						cursor: move; user-select: none; touch-action: none;
+					}
+					#chat-header .chat-sub { font-weight: normal; color: #888; font-size: 9pt; }
+					#chat-close { cursor: pointer; color: #888; }
+					#chat-close:hover { color: #c00; }
+					#chat-messages { flex: 1; overflow-y: auto; padding: 8px 10px; }
+					.chat-msg { margin-bottom: 10px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.4; }
+					.chat-msg.user { color: #1565c0; }
+					.chat-msg.user::before { content: "› "; }
+					.chat-msg.error { color: #c62828; }
+					.chat-meta { font-size: 8.5pt; color: #999; margin-top: 2px; }
+					.chat-warn { font-size: 9pt; color: #e65100; margin-top: 2px; }
+					.chat-msg details { font-size: 8.5pt; color: #777; margin-top: 2px; white-space: normal; }
+					.chat-msg details pre { white-space: pre-wrap; max-height: 200px; overflow: auto; margin: 4px 0; }
+					#chat-status { padding: 0 10px; font-size: 9pt; color: #888; min-height: 16px; }
+					#chat-form { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid #ddd; }
+					#chat-input {
+						flex: 1; resize: none; height: 44px; font-family: monospace; font-size: 10.5pt;
+						border: 1px solid #ccc; border-radius: 4px; padding: 4px 6px;
+					}
+					body.dark #chat-panel { background: rgba(20,20,20,0.97); color: #ddd; border-color: #555; }
+					body.dark #chat-header, body.dark #chat-form { border-color: #444; }
+					body.dark .chat-msg.user { color: #64b5f6; }
+					body.dark #chat-input { background: #111; color: #ddd; border-color: #555; }
+					/* Line legend — explains the dominant-leg lines' colors,
+					   styles and widths. Draggable by its header. */
+					#line-legend {
+						position: fixed; top: 44px; right: 80px; z-index: 20;
+						font-family: monospace; font-size: 9.5pt; color: #333;
+						background: rgba(255,255,255,0.95); border: 1px solid #ccc;
+						border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+						min-width: 220px;
+					}
+					#line-legend-header {
+						display: flex; justify-content: space-between; align-items: center;
+						padding: 4px 8px; border-bottom: 1px solid #ddd; font-weight: bold;
+						cursor: move; user-select: none; touch-action: none;
+					}
+					#line-legend-close { cursor: pointer; color: #888; margin-left: 12px; }
+					#line-legend-close:hover { color: #c00; }
+					#line-legend-body { padding: 4px 8px 6px; }
+					.legend-row { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+					.legend-note { color: #777; font-size: 8.5pt; margin-top: 4px; line-height: 1.35; }
+					body.dark #line-legend { background: rgba(20,20,20,0.95); color: #ddd; border-color: #555; }
+					body.dark #line-legend-header { border-color: #444; }
+					body.dark .legend-note { color: #aaa; }
+				</style>
+			</head>
+			<body>
+				<div t-att-data-asset="asset" t-att-data-refresh="refresh_interval" t-att-data-other-min-gamma="other_lines_min_gamma" id="cfg" style="display:none"/>
+				<div id="chart-container"/>
+				<div id="line-legend">
+					<div id="line-legend-header">
+						<span>Line Legend</span>
+						<span id="line-legend-close" onclick="setLegendShown(false)">&#10005;</span>
+					</div>
+					<div id="line-legend-body"/>
+				</div>
+				<div id="window-vline"/>
+				<div id="window-vline-label" class="vline-label">1h</div>
+				<div id="spinner"/>
+				<div id="status">Loading…</div>
+				<div id="exchange-label"/>
+				<div id="tf-bar">
+					<span class="tf-label">Timeframe:</span>
+					<select class="tf-btn" id="tf-select" onchange="setTf(this.value)">
+						<option value="1h" selected="selected">1h</option>
+						<option value="4h">4h</option>
+						<option value="1d">1d</option>
+					</select>
+					<span class="tf-label">Window:</span>
+					<input type="number" class="tf-btn" id="window-value-input" min="1" step="1" value="3"
+						style="width:56px;" onchange="onWindowInputChange()"
+						onkeydown="if (event.key === 'Enter') { event.preventDefault(); onWindowInputChange(); }"/>
+					<select class="tf-btn" id="window-unit-select" onchange="onWindowInputChange()">
+						<option value="h">Hours</option>
+						<option value="d" selected="selected">Days</option>
+					</select>
+					<span class="tf-label">Theme:</span>
+					<select class="tf-btn" id="theme-select" onchange="onThemeChange()">
+						<option value="light">Light</option>
+						<option value="dark">Dark</option>
+					</select>
+					<label class="tf-label" style="display:flex;align-items:center;gap:4px;">
+						<input type="checkbox" id="vline-toggle" checked="checked" onchange="onToggleVLine()"/>
+						Window Line
+					</label>
+					<label class="tf-label" style="display:flex;align-items:center;gap:4px;">
+						<input type="checkbox" id="strongest-line-toggle" checked="checked" onchange="onToggleStrongestLine()"/>
+						Strongest
+					</label>
+					<label class="tf-label" style="display:flex;align-items:center;gap:4px;">
+						<input type="checkbox" id="other-lines-toggle" checked="checked" onchange="onToggleOtherLines()"/>
+						Other Expiries
+					</label>
+					<label class="tf-label" style="display:flex;align-items:center;gap:4px;">
+						<input type="checkbox" id="window123-toggle" onchange="onToggleWindow123()"/>
+						1D/2D/3D
+					</label>
+					<label class="tf-label" style="display:flex;align-items:center;gap:4px;">
+						<input type="checkbox" id="legend-toggle" checked="checked" onchange="onToggleLegend()"/>
+						Legend
+					</label>
+					<button class="tf-btn" id="ruler-btn" onclick="toggleRuler()">Ruler</button>
+					<button class="tf-btn" id="settings-btn" onclick="openSettingsModal()">Settings</button>
+					<button class="tf-btn" id="refresh-lines-btn" onclick="manualRefreshLines()">Refresh</button>
+					<span class="tf-label" id="refresh-countdown" style="font-weight:bold" title="Time until the dominant-leg lines next auto-refresh (dankbit.refresh_interval)">Next Update: &#8212;</span>
+					<button class="tf-btn" id="chat-btn" onclick="toggleChat()" title="Ask questions about trades (local AI model)">Dankbit AI</button>
+				</div>
+				<div id="chat-panel">
+					<div id="chat-header">
+						<span>Ask Dankbit AI <span class="chat-sub">local model · all expiries · uses Window</span></span>
+						<span id="chat-close" onclick="toggleChat()">&#10005;</span>
+					</div>
+					<div id="chat-messages"/>
+					<div id="chat-status"/>
+					<div id="chat-form">
+						<textarea id="chat-input" dir="auto" placeholder="e.g. What were the biggest trades in the last 4 hours?"/>
+						<button class="tf-btn" id="chat-send" onclick="sendChat()">Send</button>
+					</div>
+				</div>
+				<div id="ruler-info"/>
+				<div id="context-menu">
+					<div class="context-menu-item" onclick="onResetChartViewClick()">Reset chart view</div>
+				</div>
+				<div id="settings-modal" class="modal-overlay" style="display:none" onclick="if (event.target === this) closeSettingsModal()">
+					<div class="modal-box">
+						<div class="modal-header">
+							<span>Chart Appearance</span>
+							<span class="modal-close" onclick="closeSettingsModal()">&#10005;</span>
+						</div>
+						<div class="modal-section">
+							<div class="modal-section-title">Dominant Leg Lines</div>
+							<label class="color-row">Expiry within <input type="number" id="days-day1" min="0" step="0.5"/> days (solid, thick) <input type="color" id="color-g1"/></label>
+							<label class="color-row">Expiry within <input type="number" id="days-day2" min="0" step="0.5"/> days (solid) <input type="color" id="color-g2"/></label>
+							<label class="color-row">Expiry within <input type="number" id="days-day3" min="0" step="0.5"/> days (dashed) <input type="color" id="color-g3"/></label>
+							<label class="color-row">Further out (dotted) <input type="color" id="color-g4"/></label>
+							<label class="color-row">1D/2D/3D lines <input type="color" id="color-window123"/></label>
+						</div>
+						<div class="modal-actions">
+							<button class="tf-btn" onclick="resetChartColors()">Reset to defaults</button>
+							<button class="tf-btn" onclick="saveChartColors()">Save</button>
+						</div>
+					</div>
+				</div>
+				<script>//<![CDATA[
+					const cfg      = document.getElementById('cfg').dataset;
+					const ASSET    = cfg.asset;
+					const REFRESH  = parseInt(cfg.refresh, 10) * 1000;
+					let nextRefreshAt = Date.now() + REFRESH;
+					let INTERVAL = '1h';
+					const COINBASE_SYMBOL = { BTC: 'BTC-USD', ETH: 'ETH-USD' }[ASSET] || (ASSET + '-USD');
+					document.getElementById('exchange-label').textContent = 'Coinbase · ' + COINBASE_SYMBOL;
+					const klineUrl = (iv, limit) => '/api/klines-coinbase/' + ASSET + '?interval=' + iv + '&limit=' + limit;
+
+					// "Window" control — a free-form number + Hours/Days unit
+					// picker (replaced the former fixed dropdown of discrete
+					// choices, which wasn't flexible enough), fed as a plain
+					// trailing-hours count into /api/ll-gamma/<asset>. 3 Days
+					// default (72h).
+					// This is the LL page's ONLY trade-domain control — there
+					// is no "Expiry" dropdown: every active expiry is always
+					// considered, and each one that has usable trades in the
+					// window gets its own dominant-leg line. Clamped
+					// client-side to
+					// WINDOW_MAX_HOURS, mirroring ll_avg_gamma_json's own
+					// server-side LL_MAX_WINDOW_HOURS clamp, so the drawn
+					// #window-vline never disagrees with what the server
+					// actually windowed on.
+					const WINDOW_MAX_HOURS = 8760; // 1 year — mirrors LL_MAX_WINDOW_HOURS
+					let WINDOW_VALUE = 3;
+					let WINDOW_UNIT  = 'd'; // 'h' or 'd'
+					let WINDOW_HOURS = 72; // 3 days default
+					const llGammaUrl = (hoursOverride) =>
+						'/api/ll-gamma/' + ASSET + '?hours=' + (hoursOverride || WINDOW_HOURS);
+
+					const LAST_TRADE_URL = '/api/last-trade/' + ASSET;
+					let   lastTradeTs = null;
+					// Total trades across every active expiry considered this
+					// poll (the response's own summed `trade_count`, one per
+					// drawn line). null until the first refreshLlGamma()
+					// resolves.
+					let   tradeCount = null;
+
+					function formatLastTradeTs(iso) {
+						if (!iso) return null;
+						return new Date(iso).toLocaleString('de-DE', {
+							timeZone: 'UTC',
+							year: 'numeric', month: '2-digit', day: '2-digit',
+							hour: '2-digit', minute: '2-digit', second: '2-digit',
+						}) + ' UTC';
+					}
+
+					const tzOffset = (() => {
+						let zone;
+						try {
+							zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+						} catch (e) {
+							return 0;
+						}
+						const d = new Date();
+						const utc = new Date(d.toLocaleString('en-US', { timeZone: 'UTC' }));
+						const local = new Date(d.toLocaleString('en-US', { timeZone: zone }));
+						return (local - utc) / 1000;
+					})();
+
+					const THEME_STORAGE_KEY = 'dankbit_theme';
+					let DARK_MODE = localStorage.getItem(THEME_STORAGE_KEY) === 'dark';
+					function rulerColor() { return DARK_MODE ? '#aaaaaa' : '#555555'; }
+
+					// "Settings" button/dialog — user-pickable colors for this
+					// page's own dominant-leg lines (one per active expiry),
+					// persisted per-browser to localStorage under a key
+					// completely separate from /4l/<asset>'s own
+					// 'dankbit_4l_chart_colors' and the Delta Chart's
+					// 'dankbit_chart_colors'. g1..g4 = the 4 expiry-distance groups'
+					// colors (see expiryGroup()); the groups' day limits are kept
+					// under their own BUCKET_STORAGE_KEY.
+					const COLOR_STORAGE_KEY = 'dankbit_ll_chart_colors';
+					const DEFAULT_COLORS = { g1: '#6A1B9A', g2: '#AB47BC', g3: '#5C6BC0', g4: '#9E9E9E', window123: '#FFA500' };
+					const BUCKET_STORAGE_KEY = COLOR_STORAGE_KEY + '_bucket_days';
+					const DEFAULT_BUCKET_DAYS = { day1: 1, day2: 7, day3: 30 };
+					let bucketDays = Object.assign({}, DEFAULT_BUCKET_DAYS);
+					try {
+						const savedDays = JSON.parse(localStorage.getItem(BUCKET_STORAGE_KEY) || '{}');
+						Object.keys(DEFAULT_BUCKET_DAYS).forEach(key => {
+							if (Number.isFinite(savedDays[key])) bucketDays[key] = savedDays[key];
+						});
+					} catch (e) { /* malformed stored value — fall back to defaults */ }
+					let chartColors = Object.assign({}, DEFAULT_COLORS);
+					try {
+						const savedColors = JSON.parse(localStorage.getItem(COLOR_STORAGE_KEY) || '{}');
+						Object.keys(DEFAULT_COLORS).forEach(key => {
+							if (savedColors[key]) chartColors[key] = savedColors[key];
+						});
+					} catch (e) { /* malformed stored value — fall back to defaults */ }
+
+					document.getElementById('theme-select').value = DARK_MODE ? 'dark' : 'light';
+					document.body.classList.toggle('dark', DARK_MODE);
+
+					const chart = LightweightCharts.createChart(document.getElementById('chart-container'), {
+						width: window.innerWidth, height: window.innerHeight,
+						layout: {
+							background: { type: 'solid', color: DARK_MODE ? '#000000' : '#ffffff' },
+							textColor: DARK_MODE ? '#d1d4dc' : '#333333',
+						},
+						grid: { vertLines: { visible: false }, horzLines: { visible: false } },
+						crosshair: { mode: LightweightCharts.CrosshairMode.Normal, horzLine: { labelBackgroundColor: 'blue' } },
+						rightPriceScale: { borderColor: DARK_MODE ? '#444444' : '#cccccc' },
+						timeScale: { borderColor: DARK_MODE ? '#444444' : '#cccccc', timeVisible: true, secondsVisible: false },
+						localization: {
+							timeFormatter: ts => new Date(ts * 1000).toLocaleString('de-DE', {
+								timeZone: 'UTC',
+								month: 'short', day: 'numeric',
+								hour: '2-digit', minute: '2-digit',
+							}),
+						},
+					});
+
+					window.addEventListener('resize', () => {
+						chart.resize(window.innerWidth, window.innerHeight);
+						updateWindowVLine();
+					});
+					chart.timeScale().subscribeVisibleLogicalRangeChange(() => updateWindowVLine());
+					function repositionBelowToolbar() {
+						const bar = document.getElementById('tf-bar');
+						if (!bar) return;
+						const bottom = Math.ceil(bar.getBoundingClientRect().bottom);
+						document.documentElement.style.setProperty('--tf-bar-bottom', bottom + 'px');
+					}
+					window.addEventListener('resize', repositionBelowToolbar);
+					repositionBelowToolbar();
+
+					const series = chart.addCandlestickSeries({
+						upColor: '#26a69a', downColor: '#ef5350',
+						borderVisible: false, wickUpColor: '#26a69a', wickDownColor: '#ef5350',
+					});
+
+					const futureAxisSeries = chart.addLineSeries({
+						color: 'rgba(0,0,0,0)', lineWidth: 1,
+						lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false,
+					});
+
+					// The dominant-leg "lines" are horizontal reference lines at
+					// the CURRENT value only (createPriceLine()), redrawn fresh
+					// on every poll — one per active expiry that has usable
+					// trades in the current Window. Held in an array so the
+					// count can vary freely (0..LL_MAX_EXPIRIES).
+					let llLines = [];
+					function clearLlLines() {
+						llLines.forEach(l => series.removePriceLine(l));
+						llLines = [];
+					}
+
+					// The last-fetched, already-sorted (by |dominant_value| desc)
+					// expiries array from refreshLlGamma() — cached client-side so
+					// the "Strongest"/"Other Expiries" checkboxes below can
+					// instantly show/hide any line via renderLlLines() without
+					// re-fetching /api/ll-gamma/<asset>.
+					let lastExpiries = [];
+
+					// The strongest expiry's own line (rank 0 in the sorted
+					// array) is gated by this checkbox — checked by default —
+					// independent of every OTHER expiry's line below.
+					let SHOW_STRONGEST_LINE = true;
+					function onToggleStrongestLine() {
+						SHOW_STRONGEST_LINE = document.getElementById('strongest-line-toggle').checked;
+						renderLlLines();
+					}
+
+					// This checkbox — checked by default — controls every
+					// OTHER expiry's line; unchecked hides all of them,
+					// checked shows only those whose |dominant gamma value|
+					// is above OTHER_LINES_MIN_ABS_GAMMA (BTC: the
+					// dankbit.ll_other_lines_min_gamma setting, in millions,
+					// default 500M; ETH: 100M — its gamma values run about 10x smaller).
+					let SHOW_OTHER_LINES = true;
+					const OTHER_LINES_MIN_ABS_GAMMA = ASSET === 'ETH' ? 1e8
+						: (parseFloat(cfg.otherMinGamma) || 500) * 1e6;
+					function onToggleOtherLines() {
+						SHOW_OTHER_LINES = document.getElementById('other-lines-toggle').checked;
+						renderLlLines();
+					}
+
+					// Each expiry's line is styled by how far away its expiry is,
+					// in 4 groups (time left <= bucketDays.day1 / day2 / day3 /
+					// beyond): color, line style and width all change between
+					// groups, since a smooth color fade over ~10 lines was
+					// unreadable. Time left is measured from now.
+					const EXPIRY_GROUPS = [
+						{ color: 'g1', style: 'Solid',  width: 3 },
+						{ color: 'g2', style: 'Solid',  width: 2 },
+						{ color: 'g3', style: 'Dashed', width: 2 },
+						{ color: 'g4', style: 'Dotted', width: 1 },
+					];
+					function expiryDaysLeft(e) {
+						return (e.expiration - Date.now()) / 86400000;
+					}
+					function expiryGroup(e) {
+						const d = expiryDaysLeft(e);
+						const i = d <= bucketDays.day1 ? 0 : d <= bucketDays.day2 ? 1 : d <= bucketDays.day3 ? 2 : 3;
+						return EXPIRY_GROUPS[i];
+					}
+					// "18h" under a day, else whole days ("3d").
+					function daysLeftLabel(e) {
+						const d = expiryDaysLeft(e);
+						return d < 1 ? Math.max(0, Math.round(d * 24)) + 'h' : Math.round(d) + 'd';
+					}
+
+					// Draws llLines from lastExpiries: rank 0 (strongest) only
+					// while SHOW_STRONGEST_LINE is checked; every other rank
+					// only while SHOW_OTHER_LINES is checked.
+					function renderLlLines() {
+						clearLlLines();
+						renderLegend();
+						lastExpiries.forEach((e, i) => {
+							if (i === 0 && !SHOW_STRONGEST_LINE) return;
+							if (i > 0 && (!SHOW_OTHER_LINES
+								|| Math.abs(e.dominant_value) <= OTHER_LINES_MIN_ABS_GAMMA)) return;
+							if (!e.dominant_price) return;
+							const group = expiryGroup(e);
+							const color = chartColors[group.color];
+							const label = e.dominant_leg + ' | ' + formatAbbreviated(e.dominant_value)
+								+ ' | ' + e.instrument + ' | ' + daysLeftLabel(e);
+							llLines.push(series.createPriceLine({
+								price: e.dominant_price, color: color, lineWidth: group.width,
+								lineStyle: LightweightCharts.LineStyle[group.style],
+								axisLabelVisible: true, axisLabelColor: color,
+								title: label,
+							}));
+						});
+					}
+
+					// "1D/2D/3D" checkbox — unchecked by default — draws 3
+					// more horizontal lines: the single strongest (rank 0)
+					// dominant-leg reading over a fixed trailing 24h/48h/72h
+					// window each, independent of the page's own free-form
+					// "Window" control above. All 3 share one color
+					// (chartColors.window123); each line's label carries its
+					// own window as a trailing "| 1D"/"| 2D"/"| 3D" segment.
+					let window123Lines = [];
+					function clearWindow123Lines() {
+						window123Lines.forEach(l => series.removePriceLine(l));
+						window123Lines = [];
+					}
+
+					let SHOW_WINDOW123 = false;
+					// Bumped on every toggle and every fetch, so a slower,
+					// superseded response (e.g. one that lands after the
+					// checkbox was unchecked) never draws its lines.
+					let window123RequestSeq = 0;
+					function onToggleWindow123() {
+						SHOW_WINDOW123 = document.getElementById('window123-toggle').checked;
+						window123RequestSeq++; // drop any fetch still in flight
+						if (SHOW_WINDOW123) refreshWindow123Lines();
+						else clearWindow123Lines();
+					}
+
+					// Fetches /api/ll-gamma/<asset>?hours=24/48/72 in parallel
+					// and draws the single strongest (rank 0) dominant-leg
+					// reading from each response as its own price line. A
+					// failed fetch leaves the previously drawn lines in place
+					// (cleared only once a fresh response arrives), same
+					// convention refreshLlGamma() itself uses. No-op while
+					// the checkbox is unchecked.
+					async function refreshWindow123Lines() {
+						if (!SHOW_WINDOW123) return;
+						const seq = ++window123RequestSeq;
+						try {
+							const results = await Promise.all([1, 2, 3].map(days =>
+								fetch(llGammaUrl(days * 24)).then(r => r.json())
+							));
+							if (seq !== window123RequestSeq || !SHOW_WINDOW123) return;
+							clearWindow123Lines();
+							results.forEach((data, idx) => {
+								const days = idx + 1;
+								const top = (data.expiries || []).slice()
+									.sort((a, b) => b.abs_value - a.abs_value)[0];
+								if (!top || !top.dominant_price) return;
+								const color = chartColors.window123;
+								const label = top.dominant_leg + ' | ' + formatAbbreviated(top.dominant_value)
+									+ ' | ' + top.instrument
+									+ ' | ' + days + 'D';
+								window123Lines.push(series.createPriceLine({
+									price: top.dominant_price, color: color, lineWidth: 2,
+									lineStyle: LightweightCharts.LineStyle.Solid,
+									axisLabelVisible: true, axisLabelColor: color,
+									title: label,
+								}));
+							});
+						} catch (e) { /* keep previously drawn lines on a failed fetch */ }
+					}
+
+					function setStatus(text) { document.getElementById('status').textContent = text; }
+
+					function lastTradeSuffix() {
+						const label = formatLastTradeTs(lastTradeTs);
+						return label ? '  ·  Last trade: ' + label : '';
+					}
+
+					function tradeCountSuffix() {
+						return tradeCount !== null ? '  ·  ' + tradeCount + ' trades' : '';
+					}
+
+					function hoursLabel(hours) {
+						if (hours >= 24 && hours % 24 === 0) return (hours / 24) + 'd';
+						return hours + 'h';
+					}
+					function windowLabel() {
+						return hoursLabel(WINDOW_HOURS) + ' trailing window';
+					}
+
+					function statusText() {
+						return ASSET + ' · LL (' + windowLabel() + ', live)'
+							+ lastTradeSuffix() + tradeCountSuffix();
+					}
+
+					async function refreshLastTrade() {
+						const data = await (await fetch(LAST_TRADE_URL)).json();
+						lastTradeTs = data.last_trade_ts || null;
+						setStatus(statusText());
+					}
+
+					function showSpinner() { document.getElementById('spinner').style.display = 'block'; }
+					function hideSpinner() { document.getElementById('spinner').style.display = 'none'; }
+
+					function toCandle(k) {
+						return { time: Math.floor(k.t / 1000) + tzOffset, open: parseFloat(k.o), high: parseFloat(k.h), low: parseFloat(k.l), close: parseFloat(k.c) };
+					}
+
+					let realCandles = [];
+
+					const TF_WINDOW = { '15m': 5, '1h': 30, '4h': 15, '1d': 365 };
+					const INTERVAL_SECONDS = { '15m': 15 * 60, '1h': 3600, '4h': 4 * 3600, '1d': 86400 };
+					const FUTURE_MARGIN_DAYS = 5;
+
+					function applyVisibleRange() {
+						if (!realCandles.length) return;
+						const days = TF_WINDOW[INTERVAL] || 15;
+						const futureEdge = realCandles[realCandles.length - 1].time + FUTURE_MARGIN_DAYS * 86400;
+						chart.timeScale().setVisibleRange({ from: futureEdge - days * 86400, to: futureEdge });
+					}
+
+					function rebuildSeriesData() {
+						series.setData(realCandles);
+
+						const intervalSec = INTERVAL_SECONDS[INTERVAL] || 3600;
+						const lastClose = realCandles.length ? realCandles[realCandles.length - 1].close : 0;
+						const lastTime = realCandles.length
+							? realCandles[realCandles.length - 1].time
+							: (Math.floor(Date.now() / 1000) + tzOffset);
+						const count = Math.round(FUTURE_MARGIN_DAYS * 86400 / intervalSec);
+						const futureTicks = [];
+						for (let i = 1; i <= count; i++) {
+							futureTicks.push({ time: lastTime + i * intervalSec, value: lastClose });
+						}
+						futureAxisSeries.setData(futureTicks);
+						updateWindowVLine();
+					}
+
+					function effectiveWindowHours() {
+						return WINDOW_HOURS;
+					}
+
+					function nearestCandleTimeAtOrBefore(t) {
+						if (!realCandles.length) return null;
+						let lo = 0, hi = realCandles.length - 1, ans = -1;
+						while (lo <= hi) {
+							const mid = (lo + hi) >> 1;
+							if (realCandles[mid].time <= t) { ans = mid; lo = mid + 1; }
+							else hi = mid - 1;
+						}
+						return ans === -1 ? realCandles[0].time : realCandles[ans].time;
+					}
+
+					let VLINE_SHOWN = true;
+					function onToggleVLine() {
+						VLINE_SHOWN = document.getElementById('vline-toggle').checked;
+						updateWindowVLine();
+					}
+
+					function updateWindowVLine() {
+						const vline = document.getElementById('window-vline');
+						const label = document.getElementById('window-vline-label');
+						if (!vline) return;
+						const hrs = effectiveWindowHours();
+						const hideAll = () => {
+							vline.style.display = 'none';
+							if (label) label.style.display = 'none';
+						};
+						if (!VLINE_SHOWN || hrs === null || hrs === undefined) { hideAll(); return; }
+						const t = Math.floor(Date.now() / 1000) - hrs * 3600 + tzOffset;
+						const snapped = nearestCandleTimeAtOrBefore(t);
+						const x = snapped === null ? null : chart.timeScale().timeToCoordinate(snapped);
+						if (x === null || x === undefined) { hideAll(); return; }
+						const rect = chartContainerEl.getBoundingClientRect();
+						const left = Math.round(rect.left + x);
+						vline.style.left = left + 'px';
+						vline.style.display = 'block';
+						if (label) {
+							label.textContent = hoursLabel(hrs);
+							label.style.left = left + 'px';
+							label.style.display = 'block';
+						}
+					}
+
+					function resetChartView() {
+						chart.priceScale('right').applyOptions({ autoScale: true });
+						applyVisibleRange();
+					}
+
+					const contextMenu = document.getElementById('context-menu');
+
+					function hideContextMenu() {
+						contextMenu.style.display = 'none';
+					}
+
+					function showContextMenu(x, y) {
+						contextMenu.style.display = 'block';
+						const maxX = window.innerWidth - contextMenu.offsetWidth - 4;
+						const maxY = window.innerHeight - contextMenu.offsetHeight - 4;
+						contextMenu.style.left = Math.min(x, maxX) + 'px';
+						contextMenu.style.top = Math.min(y, maxY) + 'px';
+					}
+
+					function onResetChartViewClick() {
+						resetChartView();
+						hideContextMenu();
+					}
+
+					const chartContainerEl = document.getElementById('chart-container');
+					chartContainerEl.addEventListener('contextmenu', e => {
+						e.preventDefault();
+						showContextMenu(e.clientX, e.clientY);
+					});
+					document.addEventListener('contextmenu', e => {
+						if (!chartContainerEl.contains(e.target)) hideContextMenu();
+					});
+					document.addEventListener('click', hideContextMenu);
+					window.addEventListener('resize', hideContextMenu);
+					window.addEventListener('scroll', hideContextMenu, true);
+
+					async function loadCandles() {
+						const resp = await (await fetch(klineUrl(INTERVAL, 500))).json();
+						const klines = (resp.result || []).slice().reverse();
+						realCandles = klines.map(toCandle);
+						rebuildSeriesData();
+						applyVisibleRange();
+						updateWindowVLine();
+					}
+
+					async function updateLatestCandle() {
+						const resp = await (await fetch(klineUrl(INTERVAL, 2))).json();
+						const klines = resp.result || [];
+						if (!klines.length) return;
+						const updated = toCandle(klines[0]);
+						if (realCandles.length && realCandles[realCandles.length - 1].time === updated.time) {
+							realCandles[realCandles.length - 1] = updated;
+						} else {
+							realCandles.push(updated);
+						}
+						rebuildSeriesData();
+					}
+
+					async function setTf(iv) {
+						INTERVAL = iv;
+						await loadCandles();
+					}
+
+					// Fired on both the number input's and the unit select's
+					// onchange (blur/Enter or a unit switch) — reads both
+					// controls, clamps into 1..WINDOW_MAX_HOURS (mirroring the
+					// server's own LL_MAX_WINDOW_HOURS clamp so the drawn
+					// #window-vline can't silently disagree with what the
+					// server actually windowed on), writes the clamped value
+					// back into the input so the field always reflects what's
+					// really in effect, then re-fetches.
+					async function onWindowInputChange() {
+						const valInput  = document.getElementById('window-value-input');
+						const unitSelect = document.getElementById('window-unit-select');
+						WINDOW_UNIT = unitSelect.value === 'd' ? 'd' : 'h';
+						let value = parseInt(valInput.value, 10);
+						if (!Number.isFinite(value) || value < 1) value = 1;
+						let hours = WINDOW_UNIT === 'd' ? value * 24 : value;
+						if (hours > WINDOW_MAX_HOURS) {
+							hours = WINDOW_MAX_HOURS;
+							value = WINDOW_UNIT === 'd' ? Math.floor(hours / 24) : hours;
+						}
+						WINDOW_VALUE = value;
+						WINDOW_HOURS = WINDOW_UNIT === 'd' ? WINDOW_VALUE * 24 : WINDOW_VALUE;
+						valInput.value = String(WINDOW_VALUE);
+						updateWindowVLine();
+						await refreshLlGamma();
+						setStatus(statusText());
+					}
+
+					function formatAbbreviated(value) {
+						const sign = value < 0 ? '-' : '';
+						const abs = Math.abs(value);
+						if (abs >= 1e6) return sign + Math.round(abs / 1e6).toLocaleString('en-US') + 'M';
+						if (abs >= 1e3) return sign + Math.round(abs / 1e3).toLocaleString('en-US') + 'K';
+						return sign + Math.round(abs).toLocaleString('en-US');
+					}
+
+					// Fetches /api/ll-gamma/<asset> (one dominant-leg gamma
+					// reading per active expiry, response sorted by
+					// |dominant gamma value| desc), caches it into
+					// lastExpiries, then calls renderLlLines() to draw the
+					// strongest expiry's line only while the "Strongest"
+					// checkbox is checked, plus every other expiry's line
+					// only while the "Other Expiries" checkbox is checked.
+					// Line color/style/width by expiry distance group — see
+					// expiryGroup(). Label: "<dom leg> | <dominant gamma
+					// value> | <instrument> | <time left>", e.g.
+					// "LC | 71M | BTC-9SEP26 | 3d" — dominant leg first, expiry
+					// name and time left last (unchanged from the former AVG-line label
+					// shape, just sourced from that leg's own price/value
+					// instead of a 4-leg average).
+					// A failed fetch leaves the previously drawn lines in
+					// place (cleared only once a fresh response arrives).
+					async function refreshLlGamma() {
+						showSpinner();
+						try {
+							const data = await (await fetch(llGammaUrl())).json();
+							lastExpiries = (data.expiries || []).slice()
+								.sort((a, b) => b.abs_value - a.abs_value);
+
+							tradeCount = typeof data.trade_count === 'number' ? data.trade_count : 0;
+							setStatus(statusText());
+
+							renderLlLines();
+							refreshWindow123Lines(); // fire-and-forget, own try/catch
+						} finally {
+							hideSpinner();
+							nextRefreshAt = Date.now() + REFRESH;
+							updateRefreshCountdown();
+						}
+					}
+
+					let gammaRefreshTimer = null;
+					function scheduleGammaRefresh() {
+						if (gammaRefreshTimer) clearTimeout(gammaRefreshTimer);
+						nextRefreshAt = Date.now() + REFRESH;
+						updateRefreshCountdown();
+						gammaRefreshTimer = setTimeout(async () => {
+							await refreshLlGamma();
+							scheduleGammaRefresh();
+						}, REFRESH);
+					}
+
+					function manualRefreshLines() {
+						refreshLlGamma().then(scheduleGammaRefresh);
+					}
+
+					function updateRefreshCountdown() {
+						const el = document.getElementById('refresh-countdown');
+						if (!el) return;
+						const secs = Math.round((nextRefreshAt - Date.now()) / 1000);
+						if (secs <= 0) { el.textContent = 'refreshing…'; return; }
+						const mm = String(Math.floor(secs / 60)).padStart(2, '0');
+						const ss = String(secs % 60).padStart(2, '0');
+						el.textContent = 'Next Update: ' + mm + ':' + ss;
+					}
+
+					function applyTheme() {
+						document.body.classList.toggle('dark', DARK_MODE);
+						chart.applyOptions({
+							layout: {
+								background: { type: 'solid', color: DARK_MODE ? '#000000' : '#ffffff' },
+								textColor: DARK_MODE ? '#d1d4dc' : '#333333',
+							},
+							rightPriceScale: { borderColor: DARK_MODE ? '#444444' : '#cccccc' },
+							timeScale: { borderColor: DARK_MODE ? '#444444' : '#cccccc' },
+						});
+					}
+
+					function onThemeChange() {
+						DARK_MODE = document.getElementById('theme-select').value === 'dark';
+						localStorage.setItem(THEME_STORAGE_KEY, DARK_MODE ? 'dark' : 'light');
+						applyTheme();
+					}
+
+					function openSettingsModal() {
+						Object.keys(DEFAULT_COLORS).forEach(key => {
+							const input = document.getElementById('color-' + key);
+							if (input) input.value = chartColors[key];
+						});
+						Object.keys(DEFAULT_BUCKET_DAYS).forEach(key => {
+							document.getElementById('days-' + key).value = bucketDays[key];
+						});
+						document.getElementById('settings-modal').style.display = 'flex';
+					}
+
+					function closeSettingsModal() {
+						document.getElementById('settings-modal').style.display = 'none';
+					}
+
+					function saveChartColors() {
+						Object.keys(DEFAULT_COLORS).forEach(key => {
+							const input = document.getElementById('color-' + key);
+							if (input) chartColors[key] = input.value;
+						});
+						localStorage.setItem(COLOR_STORAGE_KEY, JSON.stringify(chartColors));
+						Object.keys(DEFAULT_BUCKET_DAYS).forEach(key => {
+							const v = parseFloat(document.getElementById('days-' + key).value);
+							if (Number.isFinite(v) && v >= 0) bucketDays[key] = v;
+						});
+						localStorage.setItem(BUCKET_STORAGE_KEY, JSON.stringify(bucketDays));
+						refreshLlGamma();
+						closeSettingsModal();
+					}
+
+					function resetChartColors() {
+						chartColors = Object.assign({}, DEFAULT_COLORS);
+						localStorage.removeItem(COLOR_STORAGE_KEY);
+						bucketDays = Object.assign({}, DEFAULT_BUCKET_DAYS);
+						localStorage.removeItem(BUCKET_STORAGE_KEY);
+						Object.keys(DEFAULT_BUCKET_DAYS).forEach(key => {
+							document.getElementById('days-' + key).value = bucketDays[key];
+						});
+						Object.keys(DEFAULT_COLORS).forEach(key => {
+							const input = document.getElementById('color-' + key);
+							if (input) input.value = chartColors[key];
+						});
+						refreshLlGamma();
+					}
+
+					let rulerActive = false;
+					let rulerPrice1 = null;
+					let rulerLines  = [];
+
+					function toggleRuler() {
+						rulerActive = !rulerActive;
+						document.getElementById('ruler-btn').classList.toggle('active', rulerActive);
+						rulerLines.forEach(l => series.removePriceLine(l));
+						rulerLines = [];
+						rulerPrice1 = null;
+						const info = document.getElementById('ruler-info');
+						info.style.display = 'none';
+						info.textContent = '';
+					}
+
+					chart.subscribeClick(param => {
+						if (!rulerActive || !param.point) return;
+						const price = series.coordinateToPrice(param.point.y);
+						if (rulerPrice1 === null) {
+							rulerPrice1 = price;
+							rulerLines.push(series.createPriceLine({
+								price, color: rulerColor(), lineWidth: 1,
+								lineStyle: LightweightCharts.LineStyle.Dashed,
+								axisLabelVisible: true, axisLabelColor: DARK_MODE ? '#e8e8e8' : '#000000', title: '①',
+							}));
+						} else {
+							rulerLines.push(series.createPriceLine({
+								price, color: rulerColor(), lineWidth: 1,
+								lineStyle: LightweightCharts.LineStyle.Dashed,
+								axisLabelVisible: true, axisLabelColor: DARK_MODE ? '#e8e8e8' : '#000000', title: '②',
+							}));
+							const pct = ((price - rulerPrice1) / rulerPrice1 * 100);
+							const sign = pct >= 0 ? '+' : '';
+							const info = document.getElementById('ruler-info');
+							info.style.display = 'block';
+							info.textContent = rulerPrice1.toFixed(0) + ' → ' + price.toFixed(0) + '   ' + sign + pct.toFixed(2) + '%';
+							rulerPrice1 = null;
+						}
+					});
+
+					async function init() {
+						try {
+							await loadCandles();
+							await refreshLlGamma();
+							await refreshLastTrade();
+							setStatus(statusText());
+						}
+						catch (e) { setStatus('Error: ' + e.message); }
+						finally { scheduleGammaRefresh(); }
+					}
+					// Line legend: one row per expiry-distance group (sample
+					// line drawn in that group's color/style/width), plus the
+					// 1D/2D/3D lines and how to read a label. Rebuilt by
+					// renderLlLines(), so a Settings change shows up at once.
+					// Shown state and dragged position are remembered per-browser.
+					const LEGEND_KEY = COLOR_STORAGE_KEY.replace('_chart_colors', '_legend');
+					const LEGEND_DASH = { Solid: '', Dashed: '6 4', Dotted: '2 3' };
+					function legendSample(color, style, width) {
+						const ns = 'http://www.w3.org/2000/svg';
+						const svg = document.createElementNS(ns, 'svg');
+						svg.setAttribute('width', '40'); svg.setAttribute('height', '10');
+						const line = document.createElementNS(ns, 'line');
+						line.setAttribute('x1', '0'); line.setAttribute('y1', '5');
+						line.setAttribute('x2', '40'); line.setAttribute('y2', '5');
+						line.setAttribute('stroke', color);
+						line.setAttribute('stroke-width', String(width));
+						if (LEGEND_DASH[style]) line.setAttribute('stroke-dasharray', LEGEND_DASH[style]);
+						svg.appendChild(line);
+						return svg;
+					}
+					function legendDays(d) { return d + (d === 1 ? ' day' : ' days'); }
+					function renderLegend() {
+						const body = document.getElementById('line-legend-body');
+						body.textContent = '';
+						const addRow = (color, style, width, text) => {
+							const row = document.createElement('div');
+							row.className = 'legend-row';
+							row.appendChild(legendSample(color, style, width));
+							const span = document.createElement('span');
+							span.textContent = text;
+							row.appendChild(span);
+							body.appendChild(row);
+						};
+						const texts = [
+							'Expires within ' + legendDays(bucketDays.day1),
+							'Expires within ' + legendDays(bucketDays.day2),
+							'Expires within ' + legendDays(bucketDays.day3),
+							'Expires later',
+						];
+						EXPIRY_GROUPS.forEach((g, i) => addRow(chartColors[g.color], g.style, g.width, texts[i]));
+						addRow(chartColors.window123, 'Solid', 2, 'Strongest of last 1D / 2D / 3D');
+						const note = document.createElement('div');
+						note.className = 'legend-note';
+						note.textContent = 'Label: leg | gamma | expiry | time left\n'
+							+ 'Other expiries shown only above '
+							+ formatAbbreviated(OTHER_LINES_MIN_ABS_GAMMA) + ' |gamma|';
+						note.style.whiteSpace = 'pre-line';
+						body.appendChild(note);
+					}
+					function setLegendShown(shown) {
+						document.getElementById('line-legend').style.display = shown ? '' : 'none';
+						document.getElementById('legend-toggle').checked = shown;
+						saveLegendState();
+					}
+					function onToggleLegend() {
+						setLegendShown(document.getElementById('legend-toggle').checked);
+					}
+					function saveLegendState() {
+						const box = document.getElementById('line-legend');
+						try {
+							localStorage.setItem(LEGEND_KEY, JSON.stringify({
+								shown: box.style.display !== 'none',
+								left: box.style.left ? parseFloat(box.style.left) : null,
+								top: box.style.top ? parseFloat(box.style.top) : null,
+							}));
+						} catch (e) { /* ignore */ }
+					}
+					function placeLegend(left, top) {
+						const box = document.getElementById('line-legend');
+						const maxLeft = Math.max(0, window.innerWidth - box.offsetWidth);
+						const maxTop = Math.max(0, window.innerHeight - box.offsetHeight);
+						box.style.left = Math.min(Math.max(0, left), maxLeft) + 'px';
+						box.style.top = Math.min(Math.max(0, top), maxTop) + 'px';
+						box.style.right = 'auto';
+					}
+					(function initLegend() {
+						const box = document.getElementById('line-legend');
+						const header = document.getElementById('line-legend-header');
+						renderLegend();
+						try {
+							const saved = JSON.parse(localStorage.getItem(LEGEND_KEY) || 'null');
+							if (saved) {
+								if (saved.shown === false) {
+									box.style.display = 'none';
+									document.getElementById('legend-toggle').checked = false;
+								}
+								if (Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+									placeLegend(saved.left, saved.top);
+								}
+							}
+						} catch (e) { /* storage unavailable — keep default corner */ }
+						let drag = null;
+						header.addEventListener('pointerdown', (e) => {
+							if (e.target.id === 'line-legend-close' || e.button !== 0) return;
+							const rect = box.getBoundingClientRect();
+							drag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+							header.setPointerCapture(e.pointerId);
+							e.preventDefault();
+						});
+						header.addEventListener('pointermove', (e) => {
+							if (drag) placeLegend(e.clientX - drag.dx, e.clientY - drag.dy);
+						});
+						const endDrag = () => {
+							if (!drag) return;
+							drag = null;
+							saveLegendState();
+						};
+						header.addEventListener('pointerup', endDrag);
+						header.addEventListener('pointercancel', endDrag);
+						window.addEventListener('resize', () => {
+							if (box.style.left) placeLegend(parseFloat(box.style.left), parseFloat(box.style.top));
+						});
+					})();
+
+					init();
+					updateRefreshCountdown();
+					setInterval(updateLatestCandle, 5000);
+					setInterval(updateWindowVLine, 5000);
+					setInterval(updateRefreshCountdown, 1000);
+					setInterval(refreshLastTrade, REFRESH);
+				//]]></script>
+				<script>//<![CDATA[
+					// ---- Chat panel (POST /api/chat/<asset>, controllers/chat.py) ----
+					// Same panel as /4l/<asset>'s. Sends the page's Window (and
+					// page: 'll' — no selected expiry, every expiry is on screen) plus the
+					// last 2 Q/A turns for follow-ups. One request at a time —
+					// answers take ~30-60 s on the local model, so an elapsed-time
+					// counter shows while waiting. Answers are rendered with
+					// textContent (never innerHTML).
+					const chatHistory = [];
+					let chatBusy = false;
+
+					function toggleChat() {
+						const panel = document.getElementById('chat-panel');
+						panel.classList.toggle('open');
+						if (panel.classList.contains('open')) {
+							clampChatPanel();
+							document.getElementById('chat-input').focus();
+						}
+					}
+
+					// Draggable by its header. Once moved, the panel is
+					// positioned by left/top (instead of the default right/
+					// bottom corner), kept fully on screen, and the position is
+					// remembered per-browser (dankbit_ll_chat_pos).
+					const CHAT_POS_KEY = 'dankbit_ll_chat_pos';
+					function placeChatPanel(left, top) {
+						const panel = document.getElementById('chat-panel');
+						const maxLeft = Math.max(0, window.innerWidth - panel.offsetWidth);
+						const maxTop = Math.max(0, window.innerHeight - panel.offsetHeight);
+						panel.style.left = Math.min(Math.max(0, left), maxLeft) + 'px';
+						panel.style.top = Math.min(Math.max(0, top), maxTop) + 'px';
+						panel.style.right = 'auto';
+						panel.style.bottom = 'auto';
+					}
+					function clampChatPanel() {
+						const panel = document.getElementById('chat-panel');
+						if (panel.style.left) placeChatPanel(parseFloat(panel.style.left), parseFloat(panel.style.top));
+					}
+					(function initChatDrag() {
+						const panel = document.getElementById('chat-panel');
+						const header = document.getElementById('chat-header');
+						try {
+							const saved = JSON.parse(localStorage.getItem(CHAT_POS_KEY) || 'null');
+							if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+								panel.style.left = saved.left + 'px';
+								panel.style.top = saved.top + 'px';
+								panel.style.right = 'auto';
+								panel.style.bottom = 'auto';
+							}
+						} catch (e) { /* storage unavailable — keep default corner */ }
+						let drag = null;
+						header.addEventListener('pointerdown', (e) => {
+							if (e.target.id === 'chat-close' || e.button !== 0) return;
+							const rect = panel.getBoundingClientRect();
+							drag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+							header.setPointerCapture(e.pointerId);
+							e.preventDefault();
+						});
+						header.addEventListener('pointermove', (e) => {
+							if (drag) placeChatPanel(e.clientX - drag.dx, e.clientY - drag.dy);
+						});
+						const endDrag = () => {
+							if (!drag) return;
+							drag = null;
+							try {
+								localStorage.setItem(CHAT_POS_KEY, JSON.stringify({
+									left: parseFloat(panel.style.left), top: parseFloat(panel.style.top),
+								}));
+							} catch (e) { /* ignore */ }
+						};
+						header.addEventListener('pointerup', endDrag);
+						header.addEventListener('pointercancel', endDrag);
+						window.addEventListener('resize', clampChatPanel);
+					})();
+
+					function chatAppend(cls, text) {
+						const box = document.getElementById('chat-messages');
+						const div = document.createElement('div');
+						div.className = 'chat-msg ' + cls;
+						div.dir = 'auto';
+						div.textContent = text;
+						box.appendChild(div);
+						box.scrollTop = box.scrollHeight;
+						return div;
+					}
+
+					function chatSub(parent, cls, text) {
+						const d = document.createElement('div');
+						d.className = cls;
+						d.textContent = text;
+						parent.appendChild(d);
+						return d;
+					}
+
+					async function sendChat() {
+						const input = document.getElementById('chat-input');
+						const question = input.value.trim();
+						if (!question || chatBusy) return;
+						chatBusy = true;
+						input.value = '';
+						document.getElementById('chat-send').disabled = true;
+						chatAppend('user', question);
+						const status = document.getElementById('chat-status');
+						const started = Date.now();
+						const tick = setInterval(() => {
+							status.textContent = 'Thinking… ' + Math.round((Date.now() - started) / 1000) + 's';
+						}, 1000);
+						status.textContent = 'Thinking… 0s';
+						try {
+							const resp = await fetch('/api/chat/' + ASSET, {
+								method: 'POST',
+								headers: { 'Content-Type': 'application/json' },
+								body: JSON.stringify({
+									question: question,
+									page: 'll',
+									// Which of the chart's lines the user can see right now.
+									visible_lines: { strongest: SHOW_STRONGEST_LINE, other_expiries: SHOW_OTHER_LINES, window_1d_2d_3d: SHOW_WINDOW123 },
+									hours: WINDOW_HOURS,
+									history: chatHistory.slice(-2),
+								}),
+							});
+							const data = await resp.json().catch(() => ({ error: 'HTTP ' + resp.status }));
+							if (!resp.ok || data.error) throw new Error(data.error || ('HTTP ' + resp.status));
+							const msg = chatAppend('bot', data.answer);
+							if (data.unverified_numbers && data.unverified_numbers.length) {
+								chatSub(msg, 'chat-warn', '⚠ Not found in the data: ' + data.unverified_numbers.join(', ') + ' — double-check these.');
+							}
+							if (data.warning) {
+								chatSub(msg, 'chat-warn', '⚠ ' + data.warning);
+							}
+							if (data.tools && data.tools.length) {
+								const det = document.createElement('details');
+								const sum = document.createElement('summary');
+								sum.textContent = 'Data used: ' + data.tools.map(t => t.name).join(', ');
+								const pre = document.createElement('pre');
+								pre.textContent = JSON.stringify(data.tools, null, 1);
+								det.appendChild(sum);
+								det.appendChild(pre);
+								msg.appendChild(det);
+							}
+							chatSub(msg, 'chat-meta', data.model + ' · ' + data.elapsed + 's' + (data.retried ? ' · rewritten' : ''));
+							// An answer with flagged numbers never enters the follow-up history —
+							// a translation request treats the previous answer as its source, so this keeps invented
+							// figures from being laundered by "say that in Persian".
+							if (!(data.unverified_numbers && data.unverified_numbers.length) && !data.warning) {
+								chatHistory.push({ question: question, answer: data.answer });
+							}
+						} catch (e) {
+							chatAppend('error', 'Error: ' + e.message);
+						} finally {
+							clearInterval(tick);
+							status.textContent = '';
+							chatBusy = false;
+							document.getElementById('chat-send').disabled = false;
+							document.getElementById('chat-messages').scrollTop = 1e9;
+						}
+					}
+
+					document.getElementById('chat-input').addEventListener('keydown', (e) => {
+						if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+					});
+				//]]></script>
+			</body>
+		</html>
+	</template>
+</odoo>
