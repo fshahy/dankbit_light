@@ -9,20 +9,17 @@ from odoo import api, fields, models
 
 _logger = logging.getLogger(__name__)
 
-# Simple in-memory cache to avoid hitting Deribit too often.
-# Keys: 'index_price', 'instruments', optionally others.
+# Simple in-memory cache to avoid hitting Deribit too often — options data
+# only (instrument lists, open interest); prices come from Coinbase spot
+# (_COINBASE_CACHE below).
 _DERIBIT_CACHE = {
-    "index_price": {"ts": 0, "value": None},
     "instruments": {"ts": 0, "value": None},
 }
 
-# Cache for get_index_price()'s Binance spot ticker price.
-_BINANCE_CACHE = {}
-
-# Separate cache for Coinbase spot candles (get_candles_coinbase) — same
-# short-fixed-TTL reasoning as _BINANCE_CACHE above, just a distinct
-# dict/key-space since this is a different upstream API/venue than either
-# Binance (get_index_price) or the Deribit index calls cached in _DERIBIT_CACHE.
+# Cache for Coinbase spot data: get_index_price()'s ticker price (keyed
+# index_price_<asset>, TTL dankbit.deribit_cache_ttl) and
+# get_candles_coinbase()'s candles (keyed coinbase_candles_..., fixed
+# _COINBASE_CANDLES_CACHE_TTL).
 _COINBASE_CACHE = {}
 _COINBASE_CANDLES_CACHE_TTL = 5.0
 
@@ -48,40 +45,6 @@ _COINBASE_CANDLES_CACHE_TTL = 5.0
 # already in the DB.
 RECENTLY_EXPIRED_GRACE_MINUTES = 3 * 24 * 60
 
-def _safe_binance_request(
-    url,
-    params,
-    timeout=10.0,
-    retries=3,
-    backoff=0.4,
-    raise_on_fail=False,
-):
-    """Same robust GET-with-retries/backoff shape as _safe_deribit_request
-    below, for Binance's public REST API instead — Binance signals errors
-    via a JSON {"code": ..., "msg": ...} envelope (sometimes alongside a
-    non-2xx status, sometimes not, e.g. rate limiting), so the body is
-    checked even on an otherwise-200 response, same reasoning as Deribit's
-    own {"error": ...} envelope check."""
-    for attempt in range(1, retries + 1):
-        try:
-            resp = requests.get(url, params=params, timeout=timeout)
-            resp.raise_for_status()
-            data = resp.json()
-            if isinstance(data, dict) and "code" in data and "msg" in data:
-                raise RuntimeError(f"Binance error: {data}")
-            return data
-        except Exception as e:
-            _logger.warning(
-                "Binance request failed (%d/%d) %s params=%s error=%s",
-                attempt, retries, url, params, e
-            )
-            if attempt < retries:
-                time_module.sleep(backoff * (2 ** (attempt - 1)))
-            else:
-                if raise_on_fail:
-                    raise
-                return None
-
 def _safe_coinbase_request(
     url,
     params,
@@ -90,12 +53,12 @@ def _safe_coinbase_request(
     backoff=0.4,
     raise_on_fail=False,
 ):
-    """Same robust GET-with-retries/backoff shape as _safe_binance_request/
-    _safe_deribit_request above, for Coinbase Exchange's public REST API.
+    """Same robust GET-with-retries/backoff shape as _safe_deribit_request
+    below, for Coinbase Exchange's public REST API.
     Coinbase signals errors via a normal non-2xx status (caught by
     raise_for_status()) with a JSON {"message": ...} body — checked here too
-    as defense-in-depth, same reasoning as the other two helpers' own
-    envelope checks."""
+    as defense-in-depth, same reasoning as Deribit's own {"error": ...}
+    envelope check."""
     for attempt in range(1, retries + 1):
         try:
             resp = requests.get(url, params=params, timeout=timeout)
@@ -243,25 +206,22 @@ class Trade(models.Model):
                 rec.strike = 0
 
     def get_index_price(self, instrument):
-        """The live "current price" reference used for chart marker lines
-        (the blue `axvline` on PNG/zones charts), dankbit.bands's `role_close`
-        (Smart Liquidity pin/sweep flip detection) and the zones-box
-        strength range — NOT for the Greek curves
-        themselves (delta.portfolio_delta/gamma.portfolio_gamma/etc. evaluate
-        across the configured STs price grid using each trade's own strike/
-        IV/expiry; this value never enters that Black-Scholes math as `S`,
-        confirmed across every call site before switching this off Deribit —
-        see chat history). Moved to Binance spot (`/api/v3/ticker/price`) per
-        product decision."""
+        """The live "current price" reference: the blue `axvline` on the
+        /BTC, /ETH PNG chart — NOT the Greek curves themselves
+        (delta.portfolio_delta/gamma.portfolio_gamma evaluate across the
+        configured STs price grid using each trade's own strike/IV/expiry;
+        this value never enters that Black-Scholes math as `S`). Coinbase
+        spot (`/products/<product_id>/ticker`), the same venue as the
+        /4l and /ll candles — this addon always uses Coinbase spot for
+        prices."""
         currency = "BTC" if instrument.startswith("BTC") else "ETH" if instrument.startswith("ETH") else None
         if not currency:
             return 0.0
-        symbol = self._BINANCE_SYMBOL_MAP.get(currency, currency + "USDT")
+        product_id = self._COINBASE_SYMBOL_MAP[currency]
 
-        # read timeout/cache TTL from the same settings the old Deribit path
-        # used — kept as-is (not renamed to
-        # "binance_*") to avoid a settings migration for what's still just
-        # "how long to trust a cached public-API price".
+        # read timeout/cache TTL from the dankbit.deribit_* settings — kept
+        # as-is (not renamed) to avoid a settings migration for what's still
+        # just "how long to trust a cached public-API price".
         timeout = 5.0
         cache_ttl = 30.0
         try:
@@ -271,20 +231,18 @@ class Trade(models.Model):
         except Exception:
             pass
 
-        # consult cache first — keyed by currency to avoid BTC/ETH collision;
-        # _BINANCE_CACHE (not _DERIBIT_CACHE) since this is no longer a
-        # Deribit call.
+        # consult cache first — keyed by currency to avoid BTC/ETH collision
         cache_key = f"index_price_{currency}"
         now_ts = time_module.time()
-        cached = _BINANCE_CACHE.get(cache_key, {})
+        cached = _COINBASE_CACHE.get(cache_key, {})
         if cached and cached.get("value") is not None and (now_ts - cached.get("ts", 0) < cache_ttl):
             return cached.get("value")
 
-        url = "https://api.binance.com/api/v3/ticker/price"
-        data = _safe_binance_request(url, params={"symbol": symbol}, timeout=timeout)
+        url = f"https://api.exchange.coinbase.com/products/{product_id}/ticker"
+        data = _safe_coinbase_request(url, params=None, timeout=timeout)
         if data and isinstance(data, dict) and data.get("price") is not None:
             val = float(data["price"])
-            _BINANCE_CACHE[cache_key] = {"ts": now_ts, "value": val}
+            _COINBASE_CACHE[cache_key] = {"ts": now_ts, "value": val}
             return val
         else:
             if cached and cached.get("value") is not None:
@@ -297,12 +255,11 @@ class Trade(models.Model):
         """Current open interest (contracts outstanding) for every option
         instrument on `asset`, from Deribit's public get_book_summary_by_currency
         — one bulk call per currency, no auth needed, unlike per-instrument
-        ticker lookups. Used by ChartController._gamma_by_strike to cap the
-        net position it derives from cumulative signed trade flow, so
-        historical round-tripped volume at a strike can't imply a larger
-        position than what's actually outstanding right now. Cached the
-        same way get_index_price is (_DERIBIT_CACHE, dankbit.deribit_cache_ttl),
-        keyed by currency. Returns {instrument_name: open_interest} — empty
+        ticker lookups. Used for /4l's Max Pain line (four_leg_gamma_json,
+        via options.split_open_interest()/max_pain_price()). Options data,
+        so it stays on Deribit (Coinbase has no options). Cached in
+        _DERIBIT_CACHE with the dankbit.deribit_cache_ttl TTL, keyed by
+        currency. Returns {instrument_name: open_interest} — empty
         dict for an unknown asset or on total failure with no cache."""
         currency = "BTC" if asset.upper().startswith("BTC") else "ETH" if asset.upper().startswith("ETH") else None
         if not currency:
@@ -338,8 +295,6 @@ class Trade(models.Model):
                 return cached.get("value")
             _logger.exception("get_open_interest_by_currency failed and no cache available")
             return {}
-
-    _BINANCE_SYMBOL_MAP = {"BTC": "BTCUSDT", "ETH": "ETHUSDT"}
 
     @staticmethod
     def _bucket_candles(candles, bucket_seconds):

@@ -27,7 +27,7 @@ Every page requires an Odoo login.
 
 Overlaid lines:
 
-- **Blue** — current index price
+- **Blue** — current price (Coinbase spot)
 - **Dashed black** — gamma peaks and troughs
 - **Solid green / red** — prices where delta crosses zero (green: supply, red: demand)
 
@@ -72,6 +72,18 @@ Two Docker services, plus PostgreSQL:
 
 - **`web`** — Odoo 18 with the `dankbit` addon. Serves the chart pages and the Odoo backend.
 - **`dankbit_ws`** — Lightweight Python service. Authenticates with Deribit's WebSocket API and streams option trades directly into PostgreSQL.
+
+### Data sources
+
+All prices come from **Coinbase spot**; Deribit is used only for options data.
+
+| Data | Source |
+|---|---|
+| Candles (`/4l`, `/ll`) | Coinbase spot (`BTC-USD`, `ETH-USD`) |
+| Current price (blue line on `/BTC`, `/ETH`) | Coinbase spot ticker |
+| Option trades | Deribit (WebSocket, plus the optional REST backfill) |
+| Option instrument lists | Deribit |
+| Open interest (`/4l` Max Pain) | Deribit — Coinbase has no options |
 
 ---
 
@@ -179,7 +191,7 @@ Settings → Dankbit:
 | From / To price / Steps (ETH) | Same for ETH | 2,000 / 5,000 / 50 |
 | Refresh interval | Auto-refresh of live chart lines, in seconds | 60 |
 | LL Other Expiries Min \|Gamma\| (M) | `/ll/BTC`: hide other expiries' lines below this gamma, in millions | 500 |
-| Deribit API timeout | HTTP request timeout | 5 s |
+| Deribit API timeout | HTTP request timeout for Deribit calls and the Coinbase price lookup | 5 s |
 | Deribit cache TTL | How long live prices and open interest are cached | 30–300 s, depending on the call |
 
 ---

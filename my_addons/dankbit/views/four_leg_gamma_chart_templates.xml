@@ -14,19 +14,8 @@
 	     /api/klines-coinbase/<asset> proxy /tm/<asset> uses — Coinbase
 	     has no native 4h resolution, so "4h" is bucketed server-side from
 	     native 60-minute bars; 15m/1h/1d map directly onto Coinbase's own
-	     900/3600/86400-second granularities).
-	     This page originally sourced Deribit perpetual-futures candles at
-	     a fixed 1h timeframe, then moved to Binance spot candles
-	     since Deribit's chart API has no native 4h resolution, then moved
-	     to Kraken Futures to keep this page on perpetuals (not
-	     spot) while still getting a native 4h/1d resolution, then moved
-	     back to Deribit perpetuals per product decision once the 4h
-	     bucket was built server-side instead — moved to Coinbase spot
-	     per a later product decision (2026-08-20), also fixing a
-	     daily-timeframe discrepancy against the Delta Chart: Deribit's
-	     own daily bars were 08:00-UTC-anchored (its option-settlement
-	     time) rather than UTC-midnight-anchored like Coinbase's/
-	     Binance's, so "today"'s bar didn't appear until 08:00 UTC. 4 horizontal
+	     900/3600/86400-second granularities). Prices always come from
+	     Coinbase spot. 4 horizontal
 	     reference lines redrawn fresh on every poll from
 	     /api/four-leg-gamma's own latest reading (BCG/BPG/SCG/SPG — where
 	     each of the 4 trade legs' own portfolio dollar-gamma curve, over

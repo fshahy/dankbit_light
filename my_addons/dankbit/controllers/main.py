@@ -55,20 +55,14 @@ def ll_other_lines_min_gamma(env):
 _LL_LEG_CODES = {"long_call": "LC", "long_put": "LP", "short_call": "SC", "short_put": "SP"}
 
 
-def ll_dominant_legs(env, asset, STs, as_of, window_start, historical=False):
+def ll_dominant_legs(env, asset, STs, as_of, window_start):
     """Each of the soonest LL_MAX_EXPIRIES expiries' own dominant leg (the
     present leg with the largest |gamma value|, via options.per_leg_gamma())
     over that expiry's trades in [window_start, as_of], sorted by
     |gamma value| descending — what /ll/<asset> draws
-    (ll_avg_gamma_json).
-    `historical` switches the active-expiry lookup to
-    _distinct_expirations_asof() (expiries that had already traded as of
-    that moment)."""
+    (ll_avg_gamma_json)."""
     bands_model = env["dankbit.bands"]
-    if historical:
-        expirations = bands_model._distinct_expirations_asof(asset, as_of, LL_MAX_EXPIRIES)
-    else:
-        expirations = bands_model._distinct_expirations(asset, as_of, LL_MAX_EXPIRIES)
+    expirations = bands_model._distinct_expirations(asset, as_of, LL_MAX_EXPIRIES)
 
     trade_model = env["dankbit.trade"].with_context(active_test=False)
     expiries = []
