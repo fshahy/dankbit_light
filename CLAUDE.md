@@ -24,8 +24,6 @@ docker compose restart web
 
 After first startup, install the Dankbit Light addon via Odoo UI: Apps → search "Dankbit Light" → Install.
 
-The `/4l` "Chat" panel needs a host Ollama (`ollama pull qwen3:14b`) listening on all interfaces; `docker-compose.yml`'s `extra_hosts` entry on `web` maps `host.docker.internal` to the host for it (see Controllers, `/api/chat/<asset>`).
-
 **Required `.env` variables:**
 ```
 DANKBIT_POSTGRES_DB=<db_name>   # any name; db1 is the development default
@@ -86,6 +84,10 @@ Deribit WS API ──► dankbit_ws (Python asyncio) ──► PostgreSQL
 > **2026-10-29 — `/tm` and `/tm2` removed.** The Time Machine pages (`time_machine_chart`, `time_machine_v2_chart`) and their templates (`views/time_machine_chart_templates.xml`, `views/time_machine_v2_chart_templates.xml`) are gone; the remaining pages are `/4l/<asset>`, `/ll/<asset>` and the `/BTC`/`/ETH` PNG.
 >
 > **2026-10-29 — Delta Chart leftovers removed.** `/api/zones-box`, `/api/gamma-peaks` and `/api/nearest-expiry` (with `_resolve_zones_window()`/`_auto_window_hours()`), and every `?as_of=` path in the remaining APIs (`_parse_as_of_param()`, `get_candles_coinbase()`'s `as_of_ts`). `dankbit.bands` is now a `models.AbstractModel` with no fields or table: it keeps `_distinct_expirations()`, `_distinct_expirations_asof()` (chat tools), `_format_instrument()`, `_compute_asset()` (now returns only the High/Low/Middle zones, SMP/BML, trade counts, index price, expiration and the window's trades) and `get_box()`, which always computes live (since 00:00 UTC, or trailing `hours`) plus the zone strengths. Removed with it: the zone confirmation/gating pipeline (`compute_snapshot()`, the quality gates, candidate staging, `_persist_extrema()`/`_persist_live_gamma()`), `nearest_expiry()`, the per-leg Greeks chain (`_per_leg_greeks()`, `options.per_leg_greeks()`, `delta_saturation_price()`, `DELTA_SATURATION_FRACTION`, and the `theta.py`/`vega.py` modules), the `dankbit.bands` ACL row, and the chat's Delta Chart page note and `zones_window`/`window_label` plumbing — the chat's `zones` tool now reports live zones since 00:00 UTC. On the dev `db1`, the leftover tables (`dankbit_bands` and 16 others from removed models), the `dankbit.forecast_*`/`dankbit.eth_forecast_*` params and 6 orphaned `ir.actions.server` rows were deleted by hand; only `dankbit_trade` and `dankbit_chat_log` remain. Production needs the same manual cleanup.
+>
+> **2026-10-29 — Dankbit AI chat removed.** The "Dankbit AI" button and chat panel on `/4l` and `/ll`, `/api/chat/<asset>` (`controllers/chat.py`, `controllers/chat_tools.py`), the `dankbit.chat.log` model with its "Chat Log" menu/views/ACL row, the `chat_model` setting ("Dankbit AI" block) and `docker-compose.yml`'s `extra_hosts` Ollama mapping are gone. So is everything only the chat's `zones` tool used: `dankbit.bands._compute_asset()`/`get_box()`/`_attach_zone_strengths()` (the model now holds only `_distinct_expirations()`, `_distinct_expirations_asof()` and `_format_instrument()`) and `options.day_window_start()`, `zone_gamma_shares()`, `ZONE_STRENGTH_MIN_WIDTH_PCT` and `build_zone_curves()`. The module upgrade on the dev `db1` removed the model's metadata but left the `dankbit_chat_log` table. Every description of the chat, its tools and the zone computation elsewhere in this file is historical.
+>
+> **2026-10-29 — default Timeframe 4h.** `/4l/<asset>` and `/ll/<asset>` now open on the 4h Timeframe (was 1h): `selected` on the `4h` option and `let INTERVAL = '4h'` in both templates. Earlier mentions of a 1h default in this file are historical.
 >
 > **2026-10-29 — forecast code and the bands cron removed.** `controllers/forecast.py` is deleted: its `per_leg_greeks()` wrapper moved into `models/bands.py` as `_per_leg_greeks()` (same 32 field names and scaling), and Smart Synthetic Liquidity went with it — the 4 `smart_liq_*` fields on `dankbit.bands` were removed (columns dropped on upgrade), as was the `future_days_only` parameter of `_distinct_expirations()`/`_compute_asset()` (only the forecast engines passed it). The hourly "Dankbit - Compute Bands Snapshot" cron (`dankbit_compute_bands_cron`) is removed from `data/ir_cron.xml`; that file is `noupdate=1`, so an existing database needs the cron (and its `ir.actions.server`) deleted by hand — done on the dev `db1`. `dankbit.bands.compute_snapshot()` still exists but nothing calls it, so no row gets confirmed any more: `/api/zones-box` and the chat's `zones` tool return the last confirmed zones (or nothing for an expiry never confirmed) on their default path, while `?hours=`/trailing windows stay fully live. Everything elsewhere in this file about the Thales Forecast, Next Candle Forecast, Smart Liquidity and the hourly bands cron is historical.
 
@@ -232,7 +234,7 @@ Every route below is `auth="user"` — login required (see Odoo Gotchas). A logg
 Python changes to `my_addons/` take effect after `docker compose restart web`. XML/view changes and new model fields require upgrading the module:
 
 ```bash
-docker compose exec web odoo -d <db_name> -u dankbit --stop-after-init
+docker compose exec web /entrypoint.sh odoo -d <db_name> -u dankbit --stop-after-init --no-http
 docker compose restart web
 ```
 

@@ -53,14 +53,6 @@ class ResConfigSettings(models.TransientModel):
         help="Timeout in seconds for calls to Deribit public APIs."
     )
 
-    chat_model = fields.Char(
-        string="Dankbit AI model",
-        config_parameter="dankbit.chat_model",
-        default="qwen3:14b",
-        help="Ollama model name the Dankbit AI chat panel uses (/api/chat/<asset>), e.g. \"qwen3:14b\". "
-             "Must already be pulled on the Ollama host (ollama pull <name>). Left empty, falls back to qwen3:14b.",
-    )
-
     deribit_cache_ttl = fields.Float(
         string="Deribit cache TTL (s)",
         config_parameter="dankbit.deribit_cache_ttl",

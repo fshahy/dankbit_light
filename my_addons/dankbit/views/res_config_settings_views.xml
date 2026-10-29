@@ -37,12 +37,6 @@
                         </setting>
                     </block>
 
-                    <block title="Dankbit AI" id="dankbit_chat_settings" groups="base.group_no_one">
-                        <setting>
-                            <field name="chat_model" placeholder="qwen3:14b"/>
-                        </setting>
-                    </block>
-
                     <block title="ETH Settings" id="dankbit_eth_graph_settings" groups="base.group_no_one">
                         <setting>
                             <field name="eth_from_price" placeholder="ETH From Price"/>

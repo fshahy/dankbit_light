@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-from datetime import datetime, timezone
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -10,26 +10,6 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.ticker import MultipleLocator
 
 from . import gamma as gamma_lib
-
-# Every "trades since 00:00" trade window in this addon (dankbit.bands.
-# _compute_asset's default hours=None window, the chat tools) resets at UTC
-# midnight. This briefly reset at Iran (Asia/Tehran)
-# midnight instead — confirmed at the time against Thales's own numbers,
-# whose R/S (high_resistance/low_support) only matched ours under that
-# zone — but Thales dev has since asked to revert this back to UTC
-# midnight, so this is UTC-anchored again.
-
-
-def day_window_start(as_of):
-    """The most recent UTC midnight at or before `as_of`, returned as a
-    naive UTC datetime — the actual day-boundary reference behind every
-    "trades since 00:00" window in this addon (see comment above).
-    `as_of` may be naive (assumed UTC, matching the convention every caller
-    already uses, e.g. dankbit.bands._compute_asset's own `as_of`) or
-    tz-aware."""
-    as_of_utc = as_of.replace(tzinfo=timezone.utc) if as_of.tzinfo is None else as_of.astimezone(timezone.utc)
-    return as_of_utc.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-
 
 class OptionStrat:
     def __init__(self, name, S0, from_price, to_price, step):
@@ -187,8 +167,7 @@ class OptionStrat:
 def find_zero_crossings(STs, curve):
     """Return the list of prices where `curve` crosses zero, via linear
     interpolation on each sign change (STs must be ascending). Same technique
-    used by the delta=0 finders elsewhere in this codebase, and by
-    build_zone_curves()'s own Longs-vs-Shorts crossing below."""
+    used by the delta=0 finders elsewhere in this codebase."""
     crossings = []
     for i in range(len(curve) - 1):
         a, b = curve[i], curve[i + 1]
@@ -198,54 +177,6 @@ def find_zero_crossings(STs, curve):
             px = float(STs[i] - a * (STs[i + 1] - STs[i]) / (b - a))
             crossings.append(px)
     return crossings
-
-
-# A zone narrower than this share of index price (e.g. a single-curve
-# zone drawn as one line) is widened to it, centered, before measuring
-# its gamma share — otherwise a one-price zone always scores 0%.
-ZONE_STRENGTH_MIN_WIDTH_PCT = 0.005
-
-
-def zone_gamma_shares(trades, index_price, ranges, r=0.0, points=600):
-    """Strength of each zone box: the share (0..1) of the trades' gross
-    dollar gamma (|long gamma| + |short gamma|, i.e. every trade counted
-    as positive) whose area lies inside that zone's price range.
-
-    `ranges` is a list of (min, max) pairs, 0.0 meaning absent (same
-    sentinel dankbit.bands uses); an absent zone gets None. The total is
-    taken over index price ±20%, widened to cover every zone, so a zone
-    far from the money can't look strong just because the curve was
-    clipped. Shares are independent — overlapping zones (the Middle Zone
-    often sits between the other two) don't sum to 1. Returns all None
-    when there's no gamma at all."""
-    present = [p for rng in ranges for p in rng if p and p > 0]
-    if not index_price or not trades:
-        return [None] * len(ranges)
-    lo = min([index_price * 0.8] + present)
-    hi = max([index_price * 1.2] + present)
-    S = np.linspace(lo, hi, points)
-    longs = trades.filtered(lambda t: t.direction == "buy")
-    shorts = trades.filtered(lambda t: t.direction == "sell")
-    gross = np.abs(gamma_lib.portfolio_gamma(S, longs, r)) + np.abs(gamma_lib.portfolio_gamma(S, shorts, r))
-    total = float(np.trapz(gross, S))
-    if not np.isfinite(total) or total <= 0:
-        return [None] * len(ranges)
-
-    min_width = index_price * ZONE_STRENGTH_MIN_WIDTH_PCT
-    shares = []
-    for a, b in ranges:
-        vals = [p for p in (a, b) if p and p > 0]
-        if not vals:
-            shares.append(None)
-            continue
-        z_lo, z_hi = min(vals), max(vals)
-        if z_hi - z_lo < min_width:
-            mid = (z_lo + z_hi) / 2.0
-            z_lo, z_hi = mid - min_width / 2.0, mid + min_width / 2.0
-        xs = np.linspace(max(z_lo, lo), min(z_hi, hi), 100)
-        area = float(np.trapz(np.interp(xs, S, gross), xs))
-        shares.append(min(1.0, max(0.0, area / total)))
-    return shares
 
 
 # Which numpy extremum-finder each leg's gamma curve uses — long positions
@@ -262,7 +193,7 @@ def per_leg_gamma(STs, trades, r=0.0):
     unscaled. A leg with zero trades has no curve at all: gamma_price None,
     gamma_value 0.0 (np.argmax/argmin on an all-zero curve would otherwise
     report STs[0], the price-range floor, as a fake extremum). Used by
-    four_leg_gamma_json/ll_dominant_legs (main.py) and the chat tools.
+    four_leg_gamma_json/ll_dominant_legs (main.py).
     `trades` should already be filtered to one expiry/time window."""
     legs = {
         "long_call": trades.filtered(lambda t: t.direction == "buy" and t.option_type == "call"),
@@ -294,8 +225,7 @@ def split_open_interest(oi_map, instrument):
     expects. Same anchored left-prefix match every other instrument
     lookup in this addon uses (f"{instrument}-" — oi_map's keys span every
     expiry for the asset, so this can't pull in another expiry's
-    strikes). Shared by four_leg_gamma_json (main.py) and the chat
-    panel's max_pain tool (chat_tools.py) so the two can't disagree."""
+    strikes). Used by four_leg_gamma_json (main.py)."""
     prefix = f"{instrument}-"
     call_oi, put_oi = {}, {}
     for oi_instrument, oi in (oi_map or {}).items():
@@ -362,51 +292,3 @@ def max_pain_price(call_oi, put_oi):
 
     best_strike = min(total_payout, key=total_payout.get)
     return float(best_strike), total_payout
-
-
-def build_zone_curves(instrument_name, index_price, trades, from_price, to_price, steps):
-    """Build the Longs/Shorts OptionStrat curves from `trades` (any iterable of
-    objects with .direction/.option_type/.strike/.price/.index_price — an Odoo
-    recordset works directly), then re-center on the crossing-based zoom
-    exactly as the live /<instrument>/zones PNG chart does: ±$2000 for BTC,
-    ±$100 for ETH (ETH's much smaller price scale made the ±$2000 margin blow
-    out the auto-zoom). Falls back to the wide [from_price, to_price] range
-    if the curves never cross.
-
-    Shared by the /<instrument>/zones route (controllers/main.py) and
-    dankbit.bands's cron (models/bands.py) so the two can
-    never compute different extrema for the same trades — one implementation,
-    not two copies that could quietly drift apart."""
-    def build(fp, tp, st):
-        longs = OptionStrat(instrument_name, index_price, fp, tp, st)
-        shorts = OptionStrat(instrument_name, index_price, fp, tp, st)
-        for trade in trades:
-            if trade.direction == "buy":
-                if trade.option_type == "call":
-                    longs.long_call(trade.strike, trade.price * trade.index_price)
-                elif trade.option_type == "put":
-                    longs.long_put(trade.strike, trade.price * trade.index_price)
-            elif trade.direction == "sell":
-                if trade.option_type == "call":
-                    shorts.short_call(trade.strike, trade.price * trade.index_price)
-                elif trade.option_type == "put":
-                    shorts.short_put(trade.strike, trade.price * trade.index_price)
-        return longs, shorts
-
-    longs_obj, shorts_obj = build(from_price, to_price, steps)
-
-    STs = longs_obj.STs
-    diff = longs_obj.payoffs - shorts_obj.payoffs
-    crossings = find_zero_crossings(STs, diff)
-
-    if crossings:
-        if instrument_name.startswith("ETH"):
-            margin_below, margin_above = 100, 100
-        else:
-            margin_below, margin_above = 2000, 2000
-        zoom_from = min(crossings) - margin_below
-        zoom_to = max(crossings) + margin_above
-        longs_obj, shorts_obj = build(zoom_from, zoom_to, steps)
-
-    return longs_obj, shorts_obj
-

@@ -8,17 +8,15 @@ services:
       - db
     ports:
       - "8069:8069"
-    # Lets the /4l chat panel (controllers/chat.py) reach the host's Ollama
-    # at http://host.docker.internal:11434 (dankbit.chat_ollama_url).
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     volumes:
       # Persist the full Odoo Odoo data directory (includes filestore and meta)
       # Use a named volume for durability across restarts and rebuilds.
       # Use a host bind so files live on your project tree and are easy to inspect/backup.
       # WARNING: binding a host directory will hide any content that lived in the image
       # at this path. If you have an existing named volume, migrate it first (see README).
-      - ./odoo_filestore:/var/lib/odoo/.local/share/Odoo
+      # Must match data_dir in config/odoo.conf, or the filestore lives only
+      # inside the container and is lost whenever it is recreated.
+      - ./odoo_filestore:/home/ubuntu/.local/share/Odoo
       # Mount your config file and custom addons
       - ./config/odoo.conf:/etc/odoo/odoo.conf
       - ./my_addons:/mnt/my_addons
@@ -26,7 +24,7 @@ services:
     # Ensure the filestore volume is writable by the container user when
     # the container starts. This runs a quick chown (no-op if ownership is
     # already correct) and then executes the image entrypoint.
-    command: bash -c "chown -R ${UID:-1000}:${GID:-1000} /var/lib/odoo/.local/share/Odoo || true; /entrypoint.sh odoo"
+    command: bash -c "chown -R ${UID:-1000}:${GID:-1000} /home/ubuntu/.local/share/Odoo || true; /entrypoint.sh odoo"
 
   db:
     image: postgres:14.11

@@ -40,7 +40,7 @@ LL_MAX_EXPIRIES = 24
 LL_MAX_WINDOW_HOURS = 8760
 
 # /ll/BTC's "Other Expiries" cutoff, in millions of |gamma| (ETH stays 100M,
-# hardcoded in the template). Shared with the chat's shown_on_chart flag.
+# hardcoded in the template).
 LL_OTHER_LINES_MIN_GAMMA_DEFAULT = 500
 
 
@@ -60,8 +60,7 @@ def ll_dominant_legs(env, asset, STs, as_of, window_start, historical=False):
     present leg with the largest |gamma value|, via options.per_leg_gamma())
     over that expiry's trades in [window_start, as_of], sorted by
     |gamma value| descending — what /ll/<asset> draws
-    (ll_avg_gamma_json). Also called by the chat panel (chat_tools.
-    dominant_legs_by_expiry) so its answers can't disagree with the chart.
+    (ll_avg_gamma_json).
     `historical` switches the active-expiry lookup to
     _distinct_expirations_asof() (expiries that had already traded as of
     that moment)."""
@@ -594,7 +593,6 @@ class ChartController(http.Controller):
         max_pain_total_oi = 0.0
         if instrument:
             oi_map = request.env["dankbit.trade"].get_open_interest_by_currency(asset)
-            # Shared with the chat panel's max_pain tool (chat_tools.py).
             call_oi, put_oi = options.split_open_interest(oi_map, instrument)
             resolved_max_pain, _ = options.max_pain_price(call_oi, put_oi)
             if resolved_max_pain is not None:
